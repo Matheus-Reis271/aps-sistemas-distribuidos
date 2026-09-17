@@ -1,4 +1,4 @@
-# aps-ambiental — publicador (Python) + worker (Java)
+# aps-sistemas distribuidos — publicador (Python) + worker (Java)
 
 ## Contrato de mensagem
 O publicador serializa o relato de forma canonica (chaves em ordem alfabetica,
