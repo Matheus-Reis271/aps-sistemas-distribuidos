@@ -32,8 +32,7 @@ public final class AssinaturaExtratora {
      * @throws IllegalArgumentException se o campo assinatura não estiver no formato esperado
      */
     public static Resultado extrair(String payloadBruto) {
-        String texto = payloadBruto.strip();
-        Matcher m = PADRAO.matcher(texto);
+        Matcher m = PADRAO.matcher(payloadBruto);
         if (!m.matches()) {
             throw new IllegalArgumentException(
                     "payload nao comeca com \"assinatura\" como primeira chave");

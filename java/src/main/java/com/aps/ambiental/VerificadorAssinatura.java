@@ -23,6 +23,7 @@ public final class VerificadorAssinatura {
         try {
             byte[] chaveRaw = Base64.getDecoder().decode(chavePublicaBase64Raw);
             if (chaveRaw.length != 32) {
+                System.err.println("chave publica com tamanho invalido: " + chaveRaw.length);
                 return false;
             }
 
@@ -37,8 +38,11 @@ public final class VerificadorAssinatura {
             verificador.initVerify(chavePublica);
             verificador.update(mensagem);
             return verificador.verify(Base64.getDecoder().decode(assinaturaBase64));
-
+        } catch (IllegalArgumentException e) {
+            System.err.println("base64 invalido na chave ou na assinatura: " + e.getMessage());
+            return false;
         } catch (Exception e) {
+            System.err.println("falha ao verificar assinatura: " + e.getMessage())
             return false;
         }
     }

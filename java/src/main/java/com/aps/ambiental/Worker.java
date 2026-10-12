@@ -27,10 +27,15 @@ public class Worker {
     private static final double LAT_MIN = -90, LAT_MAX = 90;
     private static final double LON_MIN = -180, LON_MAX = 180;
     private static final int SEVERIDADE_MIN = 1, SEVERIDADE_MAX = 5;
+    private static final int MAX_DEDUP = 10_000;
 
-    private static final Set<String> idsJaProcessados =
-            Collections.synchronizedSet(new LinkedHashSet<>());
-
+    private static final Map<String, Boolean> IDS_JA_PROCESSADOS =
+            Collections.synchronizedSet(new LinkedHashSet<>(16, 0.75f, true));
+                 @Override
+                protected boolean removeEldestEntry(Map.Entry<String, Boolean> maisAntigo) {
+                    return size() > MAX_DEDUP;
+                }
+            };
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     public static void main(String[] args) throws Exception {
