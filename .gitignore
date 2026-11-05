@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+chave_privada.bin
+java/target/
+mosquitto/data/
+mosquitto/log/
+.idea/
+.vscode/
+*.iml
