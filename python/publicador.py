@@ -3,6 +3,8 @@
 
 """Publica relatos assinados (Ed25519) no broker MQTT.
 
+Com senha no broker, defina MQTT_USUARIO e MQTT_SENHA no ambiente.
+
 Exemplos:
     python publicador.py
     python publicador.py --tipo poluicao --severidade 4 --descricao "fumaca preta"
@@ -36,8 +38,7 @@ def obter_chave_privada() -> Ed25519PrivateKey:
         try:
             return Ed25519PrivateKey.from_private_bytes(dados)
         except ValueError:
-            # nao gera outra sozinho: chave nova e outra chave publica, e os
-            # relatos deixariam de ter a mesma autoria dos anteriores
+            # chave nova seria outra autoria: melhor parar do que trocar sozinho
             sys.exit(
                 f"{CAMINHO_CHAVE_PRIVADA} esta corrompido ({len(dados)} bytes; uma chave "
                 "Ed25519 tem 32). Apague o arquivo para gerar uma chave nova; os "
@@ -101,6 +102,9 @@ def conectar(host: str, porta: int, timeout: float = 5.0) -> mqtt.Client:
         client_id=f"publicador-{uuid.uuid4().hex[:8]}",
     )
     cliente.on_connect = on_connect
+    usuario = os.environ.get("MQTT_USUARIO")
+    if usuario:
+        cliente.username_pw_set(usuario, os.environ.get("MQTT_SENHA"))
     cliente.connect(host, porta, keepalive=30)
     cliente.loop_start()
 
@@ -114,31 +118,25 @@ def conectar(host: str, porta: int, timeout: float = 5.0) -> mqtt.Client:
 
 
 def publicar(cliente: mqtt.Client, relato: dict, timeout: float = 5.0) -> str:
-    # payload no fio = a mesma serializacao canonica usada para assinar, com o
-    # campo assinatura incluido (primeira chave em ordem alfabetica). O worker
-    # corta esse campo do texto bruto e verifica o resto.
+    # mesma serializacao usada para assinar; "assinatura" sai como primeira chave
     topico = f"ambiental/relato/{relato['tipo']}"
     info = cliente.publish(topico, json_canonico(relato), qos=1)
-    # wait_for_publish devolve None no paho 2.x; quem diz se o broker
-    # confirmou (PUBACK) e o is_published(). O PUBACK cobre so o trecho
-    # publicador -> broker: nada no MQTT avisa se o worker aceitou o relato.
+    # o PUBACK cobre so o trecho ate o broker, nao a validacao do worker
     info.wait_for_publish(timeout=timeout)
     if not info.is_published():
         raise RuntimeError(f"broker nao confirmou o relato {relato['id'][:8]} em {timeout:.0f}s")
     return topico
 
 
-# Validacao das entradas. Confere o mesmo que o worker confere depois da
-# assinatura, para que um relato que ele vai rejeitar nem saia daqui. Cada
-# funcao e usada como type= do argparse, que mostra a mensagem e sai com
-# codigo 2 em vez de um traceback.
+# Validacao das entradas (type= do argparse): as mesmas regras do worker, para
+# que um relato que ele rejeitaria nem saia daqui.
 
 def _numero(texto: str, minimo: float, maximo: float) -> float:
     try:
         valor = float(texto)
     except ValueError:
         raise argparse.ArgumentTypeError(f"'{texto}' nao e um numero") from None
-    # float() aceita "nan", "inf" e "1e999" (que vira inf); nenhum serve aqui
+    # float() aceita "nan" e "inf"
     if not math.isfinite(valor) or not minimo <= valor <= maximo:
         raise argparse.ArgumentTypeError(f"precisa ser um numero entre {minimo:g} e {maximo:g}")
     return valor
@@ -177,16 +175,13 @@ def porta(texto: str) -> int:
 
 
 def descricao(texto: str) -> str:
-    # len() conta caracteres (code points), como o worker e o PostgreSQL.
-    # No Dart, String.length conta unidades UTF-16 (um emoji vale 2); la o
-    # equivalente e texto.runes.length
+    # len() conta code points, como o worker
     if len(texto) > DESCRICAO_MAX:
         raise argparse.ArgumentTypeError(f"tem {len(texto)} caracteres; o maximo e {DESCRICAO_MAX}")
     try:
         texto.encode("utf-8")
     except UnicodeEncodeError:
-        # no Linux, bytes invalidos no argv chegam como "surrogates", que nao
-        # tem codificacao UTF-8
+        # bytes invalidos no argv chegam como surrogates
         raise argparse.ArgumentTypeError("tem bytes que nao sao UTF-8 valido") from None
     return texto
 
@@ -194,7 +189,7 @@ def descricao(texto: str) -> str:
 def main() -> None:
     p = argparse.ArgumentParser(description="Publica relatos assinados no broker MQTT.")
     p.add_argument("--host", default=os.environ.get("MQTT_HOST") or "localhost")
-    # default em texto: assim o argparse valida o MQTT_PORTA do mesmo jeito que o --porta
+    # default em texto para o argparse validar tambem o MQTT_PORTA
     p.add_argument("--porta", type=porta, default=os.environ.get("MQTT_PORTA") or "1883")
     p.add_argument("--tipo", choices=TIPOS, default="alagamento")
     p.add_argument("--severidade", type=int, choices=range(1, 6), default=3, metavar="1-5")

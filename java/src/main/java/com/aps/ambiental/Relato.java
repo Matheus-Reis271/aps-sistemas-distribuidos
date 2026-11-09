@@ -4,12 +4,8 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
 /**
- * Payload do relato, conforme o contrato de mensagem.
- *
- * Os numeros sao Double/Integer e nao double/int: com primitivo, campo
- * ausente vira 0 e "lat":0 passaria como coordenada valida. Campo
- * desconhecido e ignorado sem risco, porque a assinatura cobre os bytes
- * crus da mensagem inteira.
+ * Payload do relato. Double/Integer em vez de double/int: com primitivo,
+ * campo ausente viraria 0, e "lat":0 passaria como coordenada valida.
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class Relato {

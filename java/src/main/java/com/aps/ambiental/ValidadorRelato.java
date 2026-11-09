@@ -1,5 +1,6 @@
 package com.aps.ambiental;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -12,19 +13,13 @@ final class ValidadorRelato {
 
     static final Set<String> TIPOS = Set.of("alagamento", "poluicao", "transito");
 
-    // so a forma canonica em minusculas (a que uuid4() do Python e o pacote
-    // uuid do Dart geram): "ABC..." e "abc..." seriam ids diferentes no dedup
+    // so minusculas: "ABC..." e "abc..." seriam ids diferentes no dedup
     private static final Pattern UUID_CANONICO =
             Pattern.compile("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
 
     private static final int DESCRICAO_MAX = 500;
 
-    // Janela aceita para ts_dispositivo, contada na hora em que o worker
-    // processa. 7 dias para tras cobrem a fila offline do app; 1 dia para a
-    // frente comporta relogio adiantado. Fora dela a data so atrapalha: um
-    // relato "de 2099" apareceria primeiro em toda consulta por mais recentes,
-    // e o ano 999999999, que o Java le sem reclamar, nao cabe no timestamptz
-    // do PostgreSQL (vai ate o ano 294276).
+    // 7 dias cobrem a fila offline do app; 1 dia comporta relogio adiantado
     private static final Duration JANELA_PASSADO = Duration.ofDays(7);
     private static final Duration JANELA_FUTURO = Duration.ofDays(1);
 
@@ -40,9 +35,8 @@ final class ValidadorRelato {
             return "tipo desconhecido";
         }
         if (!topico.equals("ambiental/relato/" + r.tipo)) {
-            // o topico vem da rede e aceita qualquer texto, ate espaco: fica
-            // fora do log. O tipo ja foi conferido contra a lista
-            return "tipo " + r.tipo + " fora do topico ambiental/relato/" + r.tipo;
+            // o topico vem da rede e aceita qualquer texto: fica fora do log
+            return "tipo " + r.tipo + " recebido em outro topico";
         }
         if (r.lat == null || r.lon == null) {
             return "sem lat/lon";
@@ -67,15 +61,19 @@ final class ValidadorRelato {
             return "ts_dispositivo fora da janela aceita (ate " + JANELA_PASSADO.toDays()
                     + " dias atras e " + JANELA_FUTURO.toDays() + " dia a frente)";
         }
-        // conta caracteres (code points), como o len() do publicador e o
-        // varchar do PostgreSQL; length() contaria cada emoji como 2
-        if (r.descricao != null && r.descricao.codePointCount(0, r.descricao.length()) > DESCRICAO_MAX) {
-            return "descricao com mais de " + DESCRICAO_MAX + " caracteres";
-        }
-        if (r.descricao != null && r.descricao.indexOf('\0') >= 0) {
-            // o text do PostgreSQL nao guarda o caractere nulo: o INSERT
-            // falharia com erro de dado
-            return "descricao com caractere nulo";
+        if (r.descricao != null) {
+            // code points, como o len() do Python e o varchar do PostgreSQL
+            if (r.descricao.codePointCount(0, r.descricao.length()) > DESCRICAO_MAX) {
+                return "descricao com mais de " + DESCRICAO_MAX + " caracteres";
+            }
+            // o PostgreSQL nao guarda o caractere nulo, e um surrogate sem par
+            // viraria "?" no UTF-8: o texto gravado deixaria de ser o assinado
+            if (r.descricao.indexOf('\0') >= 0) {
+                return "descricao com caractere nulo";
+            }
+            if (!StandardCharsets.UTF_8.newEncoder().canEncode(r.descricao)) {
+                return "descricao com caractere invalido";
+            }
         }
         return null;
     }

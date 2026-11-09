@@ -4,6 +4,9 @@ services:
     container_name: broker
     ports:
       - "1883:1883"
+    environment:
+      # so na primeira subida: cria o usuario admin do dynamic-security
+      MOSQUITTO_DYNSEC_PASSWORD: ${MOSQUITTO_DYNSEC_PASSWORD:?crie o arquivo .env a partir do .env.exemplo}
     volumes:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - ./mosquitto/data:/mosquitto/data

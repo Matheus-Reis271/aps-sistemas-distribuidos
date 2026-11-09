@@ -11,18 +11,13 @@ import java.util.Set;
 /** Verificacao Ed25519 usando apenas java.security (JDK 17+, sem lib externa). */
 public final class VerificadorAssinatura {
 
-    // cabecalho DER fixo de SubjectPublicKeyInfo para Ed25519 (RFC 8410).
-    // a chave publica raw da lib cryptography do Python (32 bytes) precisa
-    // desse envelope antes do KeyFactory aceitar.
+    // envelope DER (RFC 8410) que o KeyFactory exige em volta dos 32 bytes
     private static final byte[] CABECALHO_DER_ED25519 = {
             0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00
     };
 
-    // A curva tem 8 pontos de ordem pequena, e o JDK aceita todos como chave
-    // publica. Nenhum deles tem chave privada: com o ponto identidade, por
-    // exemplo, a assinatura fixa R = identidade, S = 0 confere para qualquer
-    // mensagem, e qualquer pessoa assina "como" essa chave. Os 8 pontos tem so
-    // estes 5 valores de y (o x muda apenas o bit de sinal).
+    // y dos 8 pontos de ordem pequena: o JDK os aceita como chave, mas nenhum
+    // tem chave privada, e qualquer um forjaria assinaturas com eles
     private static final BigInteger P = BigInteger.TWO.pow(255).subtract(BigInteger.valueOf(19));
     private static final Set<BigInteger> Y_ORDEM_PEQUENA = Set.of(
             BigInteger.ZERO,                // ordem 4
@@ -74,9 +69,7 @@ public final class VerificadorAssinatura {
         }
     }
 
-    // a chave chega como 32 bytes little-endian: o y nos 255 bits de baixo e o
-    // sinal de x no bit mais alto. O mod P tambem pega as codificacoes nao
-    // canonicas (y >= P), que o JDK ja recusa de qualquer forma.
+    // 32 bytes little-endian: y nos 255 bits de baixo, sinal de x no mais alto
     static boolean ordemPequena(byte[] chaveRaw) {
         byte[] be = new byte[32];
         for (int i = 0; i < 32; i++) {

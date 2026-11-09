@@ -7,3 +7,4 @@ mosquitto/log/
 .idea/
 .vscode/
 *.iml
+.env

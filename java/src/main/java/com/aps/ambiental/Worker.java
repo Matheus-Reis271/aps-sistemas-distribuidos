@@ -3,6 +3,7 @@ package com.aps.ambiental;
 // APS - Sistema distribuido para monitoramento ambiental urbano
 // Autores: NOME1, NOME2, NOME3
 
+import com.fasterxml.jackson.core.JsonLocation;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.io.JsonEOFException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
@@ -37,34 +38,28 @@ import java.util.stream.Collectors;
  * Worker: consome os relatos, confere a assinatura Ed25519, valida o
  * conteudo e descarta duplicatas por UUID. Ainda sem gravacao em banco.
  *
- * Configuracao por variavel de ambiente:
- *   MQTT_BROKER  (padrao tcp://localhost:1883)
- *   WORKER_ID    (padrao worker-1; cada instancia precisa de um id proprio)
- *   MQTT_TOPICO  (padrao ambiental/relato/+)
+ * Variaveis de ambiente:
+ *   MQTT_BROKER   (padrao tcp://localhost:1883)
+ *   MQTT_USUARIO  e MQTT_SENHA (sem usuario, conecta como anonimo)
+ *   WORKER_ID     (padrao worker-1; um por instancia)
+ *   MQTT_TOPICO   (padrao ambiental/relato/+)
  */
 public class Worker {
 
     private static final String BROKER = env("MQTT_BROKER", "tcp://localhost:1883");
+    private static final String USUARIO = env("MQTT_USUARIO", null);
     private static final String WORKER_ID = env("WORKER_ID", "worker-1");
 
-    // Assinatura comum por padrao: o broker a guarda na sessao persistente e
-    // segura os relatos enquanto o worker esta fora, inclusive se o proprio
-    // broker reiniciar. Para dividir a carga entre varios workers, usar
-    // MQTT_TOPICO='$share/workers/ambiental/relato/+'. O custo: o Mosquitto nao
-    // persiste assinatura compartilhada, entao relatos publicados entre a volta
-    // do broker e a reconexao do worker se perdem (testado no 2.1.2).
+    // Assinatura comum: a sessao persistente guarda os relatos enquanto o
+    // worker esta fora. A compartilhada ($share/workers/...) divide a carga,
+    // mas o Mosquitto nao a persiste se o broker reiniciar (ver README).
     private static final String TOPICO = env("MQTT_TOPICO", "ambiental/relato/+");
 
-    // dedup em memoria ate o banco entrar (ai vira UNIQUE(id) na tabela).
-    // sem limite de tamanho de proposito: com janela limitada, basta mandar
-    // relatos suficientes para um id antigo sair dela e o replay passar.
-    // um milhao de ids ocupa ~124 MB.
+    // sem limite de proposito: numa janela limitada, um id antigo sairia e o
+    // replay passaria. Vira UNIQUE(id) quando o banco entrar.
     private static final Set<String> IDS_PROCESSADOS = ConcurrentHashMap.newKeySet();
 
-    // sem coercao: 4.9 nao vira 4, "-23.5" (texto) nao vira numero e numero ou
-    // booleano nao viram texto. Este ultimo caso precisa da CoercionConfig: sem
-    // ela, "descricao": 42 passava como "42". O que foi assinado tem que ser
-    // exatamente o que segue para o banco.
+    // sem coercao em nenhuma direcao: o que foi assinado e o que segue adiante
     private static final ObjectMapper MAPPER = JsonMapper.builder()
             .disable(DeserializationFeature.ACCEPT_FLOAT_AS_INT)
             .disable(MapperFeature.ALLOW_COERCION_OF_SCALARS)
@@ -84,8 +79,6 @@ public class Worker {
         try {
             MqttTopic.validate(TOPICO, true);
         } catch (IllegalArgumentException e) {
-            // sem esta checagem o erro so apareceria no subscribe, depois de
-            // conectar e numa thread separada: o worker ficaria conectado e surdo
             sair("MQTT_TOPICO invalido (%s): %s", TOPICO, e.getMessage());
         }
 
@@ -98,18 +91,20 @@ public class Worker {
         opcoes.setAutomaticReconnect(true);
         opcoes.setMaxReconnectDelay(30_000);
         opcoes.setKeepAliveInterval(30);
+        if (USUARIO != null) {
+            opcoes.setUserName(USUARIO);
+            opcoes.setPassword(env("MQTT_SENHA", "").toCharArray());
+        }
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> encerrar(cliente), "encerramento"));
 
-        log("worker %s iniciando (broker %s)", WORKER_ID, BROKER);
+        log("worker %s iniciando (broker %s, usuario %s)", WORKER_ID, BROKER,
+                USUARIO == null ? "anonimo" : limpo(USUARIO, 40));
         conectar(cliente, opcoes);
         Thread.currentThread().join();
     }
 
-    // o reconnect automatico do Paho so entra em acao depois da primeira
-    // conexao bem-sucedida; a primeira fica por nossa conta. Ele tambem nao
-    // distingue senha recusada de broker fora do ar: se a senha mudar com o
-    // worker rodando, ele continua tentando
+    // o reconnect automatico do Paho so vale depois da primeira conexao
     private static void conectar(MqttClient cliente, MqttConnectOptions opcoes) throws InterruptedException {
         long espera = 1_000;
         while (true) {
@@ -117,8 +112,7 @@ public class Worker {
                 cliente.connect(opcoes);
                 return;
             } catch (MqttSecurityException e) {
-                // usuario/senha errados ou cliente sem permissao (CONNACK 4 ou 5):
-                // o broker vai dar a mesma resposta em toda tentativa
+                // CONNACK 4 ou 5: repetir nao muda a resposta do broker
                 sair("broker recusou a conexao (%s); confira usuario, senha e ACL", e.getMessage());
             } catch (MqttException e) {
                 log("broker indisponivel (%s), nova tentativa em %ds", e.getMessage(), espera / 1_000);
@@ -141,9 +135,7 @@ public class Worker {
                 aceitos.get(), rejeitados.get(), duplicatas.get());
     }
 
-    // erro de configuracao: tentar de novo nao muda a resposta, e seguir
-    // rodando sem receber nada pareceria funcionamento normal. O shutdown
-    // hook, se ja registrado, ainda desconecta e imprime o resumo.
+    // para erros de configuracao, em que tentar de novo nao adianta
     private static void sair(String formato, Object... args) {
         log("ERRO      " + formato, args);
         System.exit(1);
@@ -160,9 +152,8 @@ public class Worker {
         @Override
         public void connectComplete(boolean reconexao, String uri) {
             log(reconexao ? "reconectado a %s" : "conectado a %s", uri);
-            // este metodo roda na thread de callback do Paho. Um subscribe
-            // sincrono aqui fica esperando o SUBACK, que nunca chega se houver
-            // mensagens acumuladas enchendo a fila dessa mesma thread (deadlock).
+            // subscribe sincrono na thread de callback trava se houver fila
+            // acumulada: o SUBACK fica atras das mensagens
             new Thread(this::assinar, "subscribe").start();
         }
 
@@ -172,12 +163,9 @@ public class Worker {
                 log("inscrito em %s", TOPICO);
             } catch (MqttException e) {
                 if (e.getReasonCode() == MqttException.REASON_CODE_SUBSCRIBE_FAILED) {
-                    // SUBACK 0x80: o broker negou a assinatura (ACL). Ficar
-                    // conectado sem receber nada e pior que parar
                     sair("broker negou a assinatura de %s; confira a ACL", TOPICO);
                 }
-                // conexao caiu no meio do subscribe: na reconexao o
-                // connectComplete roda de novo e refaz a assinatura
+                // conexao caiu no meio: a reconexao refaz a assinatura
                 log("falha ao se inscrever em %s: %s", TOPICO, e.getMessage());
             }
         }
@@ -192,15 +180,11 @@ public class Worker {
             try {
                 processar(topico, mensagem.getPayload());
             } catch (RuntimeException e) {
-                // erro de programa, nao do relato. Confirma mesmo assim: sem o ack
-                // a mensagem volta a cada reconexao e trava a fila do worker.
+                // erro do programa: confirma mesmo assim, senao a mensagem
+                // volta a cada reconexao e trava a fila
                 rejeitados.incrementAndGet();
                 log("ERRO      %s", limpo(e.toString(), 200));
             }
-            // quando o INSERT entrar, a falha dele passa por ErroBanco.classificar():
-            // REPETIR espera e tenta de novo antes deste ponto (sem confirmar),
-            // REJEITAR segue para a confirmacao abaixo e ENCERRAR para o worker
-            // sem confirmar. Nenhuma das tres cai no catch acima.
             try {
                 cliente.messageArrivedComplete(mensagem.getId(), mensagem.getQos());
             } catch (MqttException e) {
@@ -251,7 +235,7 @@ public class Worker {
         aceitos.incrementAndGet();
         log("OK        %s  %-10s  sev %d  (%.4f, %.4f)  %s", curto(relato.id), relato.tipo,
                 relato.severidade, relato.lat, relato.lon, entreAspas(relato.descricao, 60));
-        // proximo passo: INSERT no PostGIS aqui (falha: ver ErroBanco)
+        // proximo passo: INSERT no PostGIS; as falhas dele passam pela ErroBanco
     }
 
     private static void rejeitar(String id, String motivo) {
@@ -263,12 +247,8 @@ public class Worker {
         System.out.println(LocalTime.now().format(HORA) + "  " + String.format(Locale.ROOT, formato, args));
     }
 
-    // tudo que vem da rede passa por aqui antes de ir para o log: quebra de
-    // linha ou separador Unicode permitiria forjar uma linha "OK" que nao existiu.
-    // \p{Cc} e a categoria Unicode de todos os controles: alem do ASCII
-    // (\x00-\x1F e \x7F, o unico que \p{Cntrl} cobre em Java) pega o C1
-    // (U+0080 a U+009F), onde estao o NEL (U+0085) e o CSI (U+009B), que em
-    // alguns terminais vale por ESC [ e abre sequencias ANSI
+    // texto da rede antes do log: \p{Cc} pega tambem o C1 (NEL, CSI), que
+    // quebra linha ou abre sequencia ANSI em alguns terminais
     static String limpo(String texto, int max) {
         if (texto == null) {
             return "-";
@@ -277,9 +257,6 @@ public class Worker {
         return t.length() > max ? t.substring(0, max) + "..." : t;
     }
 
-    // texto livre da rede no meio de uma linha do log: entre aspas, com aspas
-    // e barras invertidas escapadas. Sem isso, uma descricao como
-    // `21:00:00  OK falso` se misturaria com o resto da linha
     static String entreAspas(String texto, int max) {
         if (texto == null) {
             return "-";
@@ -287,9 +264,8 @@ public class Worker {
         return "\"" + limpo(texto, max).replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
     }
 
-    // As mensagens do Jackson sao longas (o corte do log as partia no meio) e
-    // algumas trazem trechos do payload. Para o log basta saber qual campo
-    // veio errado ou onde a sintaxe quebrou.
+    // resumo curto no lugar da mensagem do Jackson, que e longa e as vezes
+    // traz trechos do payload
     static String resumo(JsonProcessingException e) {
         if (e instanceof JsonMappingException m && !m.getPath().isEmpty()) {
             String campo = m.getPath().stream()
@@ -300,9 +276,12 @@ public class Worker {
             }
             return "campo " + campo + ": valor invalido";
         }
-        int coluna = e.getLocation() == null ? -1 : e.getLocation().getColumnNr();
-        String onde = coluna > 0 ? " na coluna " + coluna : "";
-        return e instanceof JsonEOFException ? "JSON incompleto" + onde : "sintaxe invalida" + onde;
+        String tipo = e instanceof JsonEOFException ? "JSON incompleto" : "sintaxe invalida";
+        JsonLocation local = e.getLocation();
+        if (local == null || local.getLineNr() < 1) {
+            return tipo;
+        }
+        return tipo + " na linha " + local.getLineNr() + ", coluna " + local.getColumnNr();
     }
 
     private static String nomeDoTipo(Class<?> tipo) {

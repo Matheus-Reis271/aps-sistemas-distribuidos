@@ -3,50 +3,62 @@ package com.aps.ambiental;
 import java.sql.SQLException;
 import java.sql.SQLRecoverableException;
 import java.sql.SQLTransientException;
+import java.util.Set;
 
 /**
- * O que o worker deve fazer quando o INSERT no banco falhar. Ainda nao ha
- * gravacao; a regra fica pronta para quando ela entrar.
- *
- * A pergunta e sempre a mesma: o problema e do banco ou do relato? Repetir
- * um relato que o banco nunca vai aceitar trava a fila do mesmo jeito que uma
- * mensagem envenenada. Descartar um relato porque o banco estava fora do ar
- * perde um relato valido.
+ * O que fazer quando o INSERT falhar (a gravacao ainda nao existe). A pergunta
+ * e se o problema e do banco ou do relato: repetir um relato que o banco
+ * nunca aceita trava a fila; descartar porque o banco caiu perde um relato bom.
+ * Usada so pela thread de callback do Paho, por isso o contador nao e atomico.
  */
 final class ErroBanco {
 
     enum Acao {
-        /** banco fora do ar ou sobrecarregado: espera, tenta de novo e so confirma depois de gravar */
+        /** banco fora do ar ou sobrecarregado: espera e tenta de novo, sem confirmar */
         REPETIR,
-        /** o banco recusou este relato e vai recusar sempre: rejeita e confirma */
+        /** o banco vai recusar este relato sempre: rejeita e confirma */
         REJEITAR,
-        /** erro de configuracao do worker: encerra sem confirmar a mensagem */
+        /** erro de configuracao: encerra o worker sem confirmar */
         ENCERRAR
     }
 
-    private ErroBanco() {
+    // muitas recusas seguidas indicam schema errado, nao relatos ruins
+    static final int LIMITE_REJEICOES_SEGUIDAS = 20;
+
+    private static final Set<String> PASSAGEIROS = Set.of(
+            "57P01", "57P02", "57P03", "57P05",  // banco desligando, reiniciando ou sessao expirada
+            "57014",                             // consulta cancelada (statement_timeout)
+            "40001", "40P01");                   // conflito entre transacoes
+
+    private int rejeicoesSeguidas;
+
+    /** Classifica a falha e aplica o disjuntor de rejeicoes seguidas. */
+    Acao decidir(SQLException e) {
+        Acao acao = classificar(e);
+        if (acao == Acao.REJEITAR && ++rejeicoesSeguidas >= LIMITE_REJEICOES_SEGUIDAS) {
+            return Acao.ENCERRAR;
+        }
+        return acao;
+    }
+
+    /** Chamar depois de cada INSERT bem-sucedido. */
+    void gravou() {
+        rejeicoesSeguidas = 0;
     }
 
     static Acao classificar(SQLException e) {
         String estado = e.getSQLState() == null ? "" : e.getSQLState();
-
         if (e instanceof SQLTransientException || e instanceof SQLRecoverableException
-                || estado.startsWith("08")        // conexao caiu ou nao abriu
-                || estado.startsWith("53")        // banco sem recurso: conexoes, memoria, disco
-                || estado.startsWith("57P0")      // banco desligando ou reiniciando
-                || estado.equals("40001")         // conflito de serializacao entre transacoes
-                || estado.equals("40P01")) {      // deadlock
+                || estado.startsWith("08")       // conexao
+                || estado.startsWith("53")       // sem conexoes livres, memoria ou disco
+                || PASSAGEIROS.contains(estado)) {
             return Acao.REPETIR;
         }
-        if (estado.startsWith("22")               // dado invalido: data, numero, texto
-                || estado.startsWith("23")) {     // restricao violada: NOT NULL, CHECK...
+        if (estado.startsWith("22") || estado.startsWith("23")) {   // dado invalido ou restricao
             return Acao.REJEITAR;
         }
-        // Senha errada (28), tabela, coluna ou permissao (42), banco que nao
-        // existe (3D) e qualquer estado desconhecido. O relato nao tem culpa,
-        // entao nao pode ser descartado, e repetir nao resolve. Parar sem
-        // confirmar deixa a mensagem guardada no broker ate alguem corrigir a
-        // configuracao e religar o worker.
+        // senha (28), tabela ou permissao (42), banco apagado ou inexistente
+        // (57P04, 3D) e desconhecidos: a mensagem espera no broker
         return Acao.ENCERRAR;
     }
 }

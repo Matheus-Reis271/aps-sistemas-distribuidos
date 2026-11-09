@@ -1,0 +1,2 @@
+# o bash do Git Bash nao roda script com CRLF
+*.sh text eol=lf

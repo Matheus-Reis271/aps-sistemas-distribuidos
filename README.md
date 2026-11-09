@@ -3,14 +3,23 @@
 ## Como rodar
 
 **1. Broker** (Mosquitto 2.1.2, com persistencia em `mosquitto/data/`)
+
+Na primeira vez, copie o `.env.exemplo` para `.env` (que fica fora do git) e
+troque a senha do admin. Depois:
 ```
 docker compose up -d
+bash mosquitto/configurar-acl.sh
 ```
+O script cria os usuarios `worker` e `publicador` e pede a senha de cada um
+(no Windows, rode pelo Git Bash). So e preciso rodar de novo se a pasta
+`mosquitto/data/` for apagada, porque os usuarios ficam nela.
 
 **2. Worker** (JDK 17+)
 ```
 cd java
 mvn clean package
+export MQTT_USUARIO=worker
+read -rsp "senha: " MQTT_SENHA && export MQTT_SENHA
 java -jar target/ambiental-worker-1.0.0.jar
 ```
 
@@ -18,11 +27,17 @@ java -jar target/ambiental-worker-1.0.0.jar
 ```
 cd python
 pip install cryptography paho-mqtt
+export MQTT_USUARIO=publicador
+read -rsp "senha: " MQTT_SENHA && export MQTT_SENHA
 python publicador.py
 python publicador.py --tipo poluicao --severidade 4 --descricao "fumaca preta"
 python publicador.py --quantidade 10 --intervalo 0.5
 ```
-Na primeira execucao ele gera `chave_privada.bin` (permissao 600, fora do git).
+O `read -s` le a senha sem mostrar na tela e sem gravar no historico do shell.
+No PowerShell 7: `$env:MQTT_USUARIO="worker"` e
+`$env:MQTT_SENHA = Read-Host -MaskInput "senha"`.
+
+Na primeira execucao o publicador gera `chave_privada.bin` (permissao 600, fora do git).
 `python publicador.py --help` lista as opcoes. O publicador confere as
 entradas antes de conectar: coordenada finita e dentro da faixa e descricao de
 ate 500 caracteres (as mesmas regras do worker), quantidade de pelo menos 1,
@@ -32,7 +47,7 @@ publicador avisa e encerra, em vez de gerar outra chave sozinho.
 
 Saida do worker:
 ```
-21:39:44  worker worker-1 iniciando (broker tcp://localhost:1883)
+21:39:44  worker worker-1 iniciando (broker tcp://localhost:1883, usuario worker)
 21:39:44  conectado a tcp://localhost:1883
 21:39:44  inscrito em ambiental/relato/+
 21:39:48  OK        f6dc2366  alagamento  sev 3  (-23.5505, -46.6333)  "agua na altura do meio-fio"
@@ -49,7 +64,8 @@ Se o broker estiver fora do ar, o worker tenta de novo com espera crescente
 desconectando do broker; a sessao continua la e os relatos que chegarem
 enquanto o worker estiver parado sao entregues quando ele voltar.
 
-Para ver todo o trafego do broker: `docker exec broker mosquitto_sub -v -t '#'`
+Para ver todo o trafego do broker:
+`docker exec broker mosquitto_sub -u admin -P <senha-do-admin> -v -t '#'`
 
 ## Configuracao do worker
 
@@ -58,6 +74,7 @@ Por variavel de ambiente:
 | variavel      | padrao                  |
 |---------------|-------------------------|
 | `MQTT_BROKER` | `tcp://localhost:1883`  |
+| `MQTT_USUARIO`, `MQTT_SENHA` | sem usuario, conecta como anonimo (o broker recusa) |
 | `WORKER_ID`   | `worker-1`              |
 | `MQTT_TOPICO` | `ambiental/relato/+`    |
 
@@ -73,6 +90,34 @@ workers com o mesmo id tomam a sessao um do outro em loop e nenhum trabalha.
   relato vai para um worker so). Ressalva: o Mosquitto nao persiste assinatura
   compartilhada. Se o broker reiniciar, os relatos publicados antes de o worker
   reconectar se perdem, mesmo com o broker tendo confirmado ao publicador.
+
+## Senha e ACL
+O broker nao aceita cliente anonimo. Usuarios, senhas e ACL ficam no plugin
+`dynamic-security`, no arquivo `mosquitto/data/dynamic-security.json` (fora do
+git; as senhas ficam so em hash). O `configurar-acl.sh` da a cada usuario so o
+que ele precisa:
+
+| usuario      | pode                                                     |
+|--------------|----------------------------------------------------------|
+| `worker`     | se inscrever em `ambiental/relato/+` e receber os relatos (tambem com `$share`) |
+| `publicador` | publicar em `ambiental/relato/+`                         |
+| `admin`      | administrar o broker e ver todo o trafego                |
+
+Por que `dynamic-security` e nao `acl_file`: o `acl_file` aceita qualquer
+subscribe e so filtra na entrega, entao um worker com a permissao errada fica
+"inscrito" e surdo, sem erro nenhum. O `dynamic-security` recusa o subscribe
+(SUBACK 0x80), e o worker encerra com uma mensagem clara. Senha errada tambem
+encerra o worker (CONNACK 5) em vez de ele tentar para sempre.
+
+Tres limites:
+- publicar sem permissao nao da erro no MQTT 3.1.1: o broker confirma (PUBACK)
+  e descarta a mensagem. Com a senha do worker, o publicador mostra
+  "confirmado pelo broker" e o relato nunca chega;
+- sem TLS, usuario e senha passam em texto puro na rede. No localhost da
+  apresentacao nao faz diferenca; o passo seguinte seria um listener TLS na
+  porta 8883;
+- o reconnect automatico do Paho nao distingue senha recusada de broker fora
+  do ar: se a senha mudar com o worker rodando, ele continua tentando.
 
 ## Contrato de mensagem
 O publicador serializa o relato de forma canonica (chaves em ordem alfabetica,
@@ -96,7 +141,9 @@ Regras que o worker aplica depois de conferir a assinatura:
 - `descricao`: opcional, ate 500 caracteres, sem caractere nulo (`\u0000`),
   que o PostgreSQL nao guarda. Caractere aqui e code point, como no `len()` do
   Python e no `varchar` do PostgreSQL: um emoji conta 1. No Dart,
-  `String.length` conta unidades UTF-16 (emoji vale 2); use `descricao.runes.length`
+  `String.length` conta unidades UTF-16 (emoji vale 2); use `descricao.runes.length`.
+  Surrogate sem par (`\ud800` sozinho) tambem e recusado: no UTF-8 ele vira
+  `?` e o texto gravado deixaria de ser o assinado
 - campos a mais sao ignorados (estao cobertos pela assinatura do mesmo jeito)
 
 A janela de data tambem tem efeito sobre replay: depois que o worker reinicia
@@ -112,7 +159,8 @@ de serializar, senao a verificacao falha. E nenhum campo pode vir antes de
 Com QoS 1, o publicador so mostra "confirmado pelo broker" depois do PUBACK.
 Isso cobre apenas o trecho publicador -> broker: o broker recebeu e guardou a
 mensagem. Nada no MQTT avisa o publicador se o worker aceitou ou rejeitou o
-relato depois. A confirmacao fim a fim tem de ser construida por cima, e o app
+relato depois, e com MQTT 3.1.1 nem que a ACL deixou publicar (ver "Senha e
+ACL"). A confirmacao fim a fim tem de ser construida por cima, e o app
 vai ter a mesma limitacao. Duas saidas, se o app precisar mostrar "relato
 recebido":
 - o worker publica o resultado em `ambiental/resposta/<id>`, e o app se
@@ -136,30 +184,20 @@ tarde, o cadastro de dispositivos.
 - Dedup por UUID em memoria, sem limite, zera a cada reinicio do worker. Vira
   `UNIQUE(id)` no Postgres quando a gravacao entrar.
 - Sem gravacao em banco ainda - so valida e loga. Quando o INSERT entrar, a
-  falha dele passa por `ErroBanco.classificar()`, que decide pelo SQLState:
-  - conexao (08), falta de recurso (53), banco reiniciando (57P01 a 57P03) ou
+  falha dele passa pela `ErroBanco`, que decide pelo SQLState:
+  - conexao (08), falta de recurso (53), banco reiniciando ou sessao expirada
+    (57P01, 57P02, 57P03, 57P05), consulta cancelada por timeout (57014) ou
     conflito entre transacoes (40001, 40P01): espera, tenta de novo e so
     confirma a mensagem depois de gravar;
-  - dado invalido (22) ou restricao violada (23): o banco vai recusar sempre,
-    entao o relato e rejeitado e confirmado. Repetir travaria a fila como uma
-    mensagem envenenada;
-  - qualquer outro (senha errada, tabela que nao existe, permissao): para o
-    worker sem confirmar, e a mensagem espera no broker ate a configuracao ser
-    corrigida. Rejeitar nesse caso descartaria relatos validos.
-- `allow_anonymous true`: qualquer cliente na rede le e publica em qualquer
-  topico, inclusive nos de alerta. Proximo passo: usuario/senha e ACL com os
-  plugins `mosquitto_password_file` e `mosquitto_acl_file`, que ja vem na imagem.
-  O worker ja trata a recusa: senha errada na primeira conexao (CONNACK 4 ou 5)
-  ou assinatura negada (SUBACK 0x80) encerram o worker com mensagem clara, em
-  vez de tentar para sempre ou ficar conectado sem receber nada. Duas
-  ressalvas, uma do broker e outra do Paho:
-  - o `mosquitto_acl_file` nao confere assinaturas: aceita qualquer subscribe
-    e so filtra na entrega. Um worker sem permissao de leitura fica inscrito e
-    nao recebe nada, sem erro nenhum. O SUBACK 0x80 vem do plugin
-    `dynamic-security`. Com `acl_file`, confira a leitura do usuario do worker
-    com `mosquitto_sub -u <usuario> -P <senha> -t 'ambiental/relato/+'` antes
-    de subir;
-  - o reconnect automatico do Paho nao distingue senha recusada de broker fora
-    do ar: se a senha mudar com o worker rodando, ele continua tentando.
+  - dado invalido (22) ou restricao violada (23): rejeita e confirma, porque
+    repetir travaria a fila como uma mensagem envenenada;
+  - qualquer outro (senha errada, tabela que nao existe, banco apagado 57P04):
+    para o worker sem confirmar, e a mensagem espera no broker ate a
+    configuracao ser corrigida.
+
+  Um disjuntor cobre o schema errado (uma coluna NOT NULL que o worker nao
+  preenche, por exemplo): 20 rejeicoes seguidas vindas do banco viram
+  "encerrar". Um relato ruim de vez em quando e normal; todos recusados indicam
+  erro de configuracao, e confirma-los seria perder todos os dados.
 - Faixa de severidade assumida como 1 a 5; confirmar com o grupo se o
   enunciado ou a proposta definem outra escala.

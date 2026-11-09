@@ -5,16 +5,10 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * O publicador serializa o relato com chaves em ordem alfabetica e sem
- * espacos (json.dumps sort_keys=True, separators=(',',':')), incluindo o
- * campo "assinatura" nessa mesma serializacao. Como "assinatura" e a
- * primeira chave em ordem alfabetica, ela sempre aparece logo apos o "{".
- *
- * Por isso a verificacao aqui nao reconstroi o objeto (reserializar em
- * Java pode formatar numero, null ou caractere de controle diferente do
- * Python e quebrar a assinatura por motivo errado). Em vez disso corta o
- * campo assinatura do texto bruto recebido e verifica os bytes restantes
- * exatamente como chegaram.
+ * Corta o campo "assinatura" do texto bruto e devolve os bytes que foram
+ * assinados. O publicador serializa com chaves em ordem alfabetica, entao
+ * "assinatura" e sempre a primeira. Reconstruir o objeto em Java poderia
+ * formatar numeros diferente do Python e quebrar a assinatura.
  */
 public final class AssinaturaExtratora {
 
@@ -27,10 +21,7 @@ public final class AssinaturaExtratora {
     public record Resultado(String assinaturaBase64, byte[] mensagemAssinada) {
     }
 
-    /**
-     * @param payloadBruto texto exato recebido no MQTT (UTF-8), sem qualquer parse prévio
-     * @throws IllegalArgumentException se o campo assinatura não estiver no formato esperado
-     */
+    /** @throws IllegalArgumentException se "assinatura" nao for a primeira chave */
     public static Resultado extrair(String payloadBruto) {
         Matcher m = PADRAO.matcher(payloadBruto);
         if (!m.matches()) {
